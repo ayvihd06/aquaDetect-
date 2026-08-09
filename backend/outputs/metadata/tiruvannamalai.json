@@ -1,0 +1,92 @@
+{
+  "district": "tiruvannamalai",
+  "total_water_area_km2": 0.18,
+  "water_body_count": 12,
+  "bounding_box_count": 12,
+  "bounding_boxes": [
+    {
+      "id": 1,
+      "min_longitude": 79.130619,
+      "min_latitude": 12.187701,
+      "max_longitude": 79.13099,
+      "max_latitude": 12.188155
+    },
+    {
+      "id": 2,
+      "min_longitude": 79.132026,
+      "min_latitude": 12.196569,
+      "max_longitude": 79.132575,
+      "max_latitude": 12.197747
+    },
+    {
+      "id": 3,
+      "min_longitude": 79.131849,
+      "min_latitude": 12.195304,
+      "max_longitude": 79.132315,
+      "max_latitude": 12.196116
+    },
+    {
+      "id": 4,
+      "min_longitude": 79.130151,
+      "min_latitude": 12.187088,
+      "max_longitude": 79.133841,
+      "max_latitude": 12.193053
+    },
+    {
+      "id": 5,
+      "min_longitude": 79.133873,
+      "min_latitude": 12.208336,
+      "max_longitude": 79.134612,
+      "max_latitude": 12.209147
+    },
+    {
+      "id": 6,
+      "min_longitude": 79.134963,
+      "min_latitude": 12.210238,
+      "max_longitude": 79.135517,
+      "max_latitude": 12.210782
+    },
+    {
+      "id": 7,
+      "min_longitude": 79.144449,
+      "min_latitude": 12.206957,
+      "max_longitude": 79.144909,
+      "max_latitude": 12.207772
+    },
+    {
+      "id": 8,
+      "min_longitude": 79.144988,
+      "min_latitude": 12.208951,
+      "max_longitude": 79.146002,
+      "max_latitude": 12.209406
+    },
+    {
+      "id": 9,
+      "min_longitude": 79.1475,
+      "min_latitude": 12.204537,
+      "max_longitude": 79.148052,
+      "max_latitude": 12.205172
+    },
+    {
+      "id": 10,
+      "min_longitude": 79.154721,
+      "min_latitude": 12.208573,
+      "max_longitude": 79.156659,
+      "max_latitude": 12.210557
+    },
+    {
+      "id": 11,
+      "min_longitude": 79.159251,
+      "min_latitude": 12.206069,
+      "max_longitude": 79.160449,
+      "max_latitude": 12.206879
+    },
+    {
+      "id": 12,
+      "min_longitude": 79.160346,
+      "min_latitude": 12.206794,
+      "max_longitude": 79.161454,
+      "max_latitude": 12.20761
+    }
+  ]
+}

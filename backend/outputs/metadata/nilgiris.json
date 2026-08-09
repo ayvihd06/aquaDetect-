@@ -1,0 +1,85 @@
+{
+  "district": "nilgiris",
+  "total_water_area_km2": 2.99,
+  "water_body_count": 11,
+  "bounding_box_count": 11,
+  "bounding_boxes": [
+    {
+      "id": 1,
+      "min_longitude": 76.602168,
+      "min_latitude": 11.396642,
+      "max_longitude": 76.602445,
+      "max_latitude": 11.396913
+    },
+    {
+      "id": 2,
+      "min_longitude": 76.603865,
+      "min_latitude": 11.386774,
+      "max_longitude": 76.625069,
+      "max_latitude": 11.397893
+    },
+    {
+      "id": 3,
+      "min_longitude": 76.603417,
+      "min_latitude": 11.421843,
+      "max_longitude": 76.606804,
+      "max_latitude": 11.423751
+    },
+    {
+      "id": 4,
+      "min_longitude": 76.60575,
+      "min_latitude": 11.429522,
+      "max_longitude": 76.607302,
+      "max_latitude": 11.431428
+    },
+    {
+      "id": 5,
+      "min_longitude": 76.60687,
+      "min_latitude": 11.434041,
+      "max_longitude": 76.607512,
+      "max_latitude": 11.435308
+    },
+    {
+      "id": 6,
+      "min_longitude": 76.607337,
+      "min_latitude": 11.43228,
+      "max_longitude": 76.619055,
+      "max_latitude": 11.439531
+    },
+    {
+      "id": 7,
+      "min_longitude": 76.63452,
+      "min_latitude": 11.46155,
+      "max_longitude": 76.63562,
+      "max_latitude": 11.462185
+    },
+    {
+      "id": 8,
+      "min_longitude": 76.636882,
+      "min_latitude": 11.409735,
+      "max_longitude": 76.666846,
+      "max_latitude": 11.444375
+    },
+    {
+      "id": 9,
+      "min_longitude": 76.637877,
+      "min_latitude": 11.439652,
+      "max_longitude": 76.639068,
+      "max_latitude": 11.440558
+    },
+    {
+      "id": 10,
+      "min_longitude": 76.657451,
+      "min_latitude": 11.448028,
+      "max_longitude": 76.661114,
+      "max_latitude": 11.451379
+    },
+    {
+      "id": 11,
+      "min_longitude": 76.677331,
+      "min_latitude": 11.44784,
+      "max_longitude": 76.677882,
+      "max_latitude": 11.448384
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Node modules & build files
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Python virtual environment & cache
+backend/venv/
+backend/__pycache__/
+backend/*/__pycache__/
+backend/*/*/__pycache__/
+backend/*/*/*/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Environment & OS files
+.env
+.env.local
+.DS_Store
+Thumbs.db
