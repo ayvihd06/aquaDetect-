@@ -134,9 +134,41 @@ AquaDetect combines geospatial frontend interactive mapping with Python raster p
 ### Prerequisites
 - **Python 3.9+**
 - **Node.js 18+** and **npm**
-- **Google Earth Engine Account & GCP Project ID**:
-  - An active Google Earth Engine account.
-  - A registered Google Cloud Platform (GCP) Project ID with the Earth Engine API enabled (e.g. `aquadetect-504614` configured in `backend/app/services/earth_engine.py`).
+- **Google Earth Engine Account & GCP Project ID** (See setup guide below)
+
+---
+
+### 🌍 Google Earth Engine & GCP Project ID Setup Guide
+
+If you are setting up Google Earth Engine for the first time or using your own GCP credentials, follow these 5 steps:
+
+#### Step 1: Sign Up for Google Earth Engine
+1. Visit the [Google Earth Engine Signup Page](https://earthengine.google.com/signup/).
+2. Register using your Google account and select **Non-commercial** or **Unpaid Commercial / Research** access.
+
+#### Step 2: Create a Google Cloud Project (GCP Project ID)
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
+2. Click the project selector dropdown at the top navigation bar and click **New Project**.
+3. Enter a Project Name (e.g., `AquaDetect`).
+4. Note your unique **Project ID** (e.g., `aquadetect-504614` or `my-water-app-12345`).
+
+#### Step 3: Enable the Earth Engine API
+1. In the Google Cloud Console search bar, search for **"Google Earth Engine API"**.
+2. Alternatively, navigate to **APIs & Services** > **Library**.
+3. Select **Google Earth Engine API** and click the **Enable** button.
+
+#### Step 4: Authenticate Local Terminal Environment
+Open your terminal (with your python virtual environment activated) and run:
+```bash
+earthengine authenticate
+```
+Follow the browser authentication prompt, sign in with your Google account, and grant Earth Engine permissions.
+
+#### Step 5: Configure the Project ID in Backend Code
+Open [`backend/app/services/earth_engine.py`](file:///c:/Users/Dhivyabharathi%20G/Desktop/a/backend/app/services/earth_engine.py#L8) and update the `PROJECT_ID` variable with your GCP Project ID:
+```python
+PROJECT_ID = "your-gcp-project-id"  # e.g., "aquadetect-504614"
+```
 
 ---
 
@@ -164,18 +196,17 @@ AquaDetect combines geospatial frontend interactive mapping with Python raster p
    pip install -r requirements.txt
    ```
 
-4. **Authenticate Google Earth Engine (Required for GEE features)**:
-   Authenticate your local environment with your Google Earth Engine credentials:
+4. Authenticate Earth Engine (if not already done):
    ```bash
    earthengine authenticate
    ```
-   > **Note on Project ID**: The application uses a Google Earth Engine Cloud Project ID to initialize `ee.Initialize(project="YOUR_PROJECT_ID")`. Update the `PROJECT_ID` constant in [`backend/app/services/earth_engine.py`](file:///c:/Users/Dhivyabharathi%20G/Desktop/a/backend/app/services/earth_engine.py#L8) with your GCP project ID if using a custom Google Earth Engine project.
 
 5. Start the FastAPI backend server:
    ```bash
    uvicorn app.main:app --reload --port 8000
    ```
    The backend API will be available at `http://127.0.0.1:8000`. API docs can be accessed at `http://127.0.0.1:8000/docs`.
+
 
 
 ---
