@@ -134,6 +134,9 @@ AquaDetect combines geospatial frontend interactive mapping with Python raster p
 ### Prerequisites
 - **Python 3.9+**
 - **Node.js 18+** and **npm**
+- **Google Earth Engine Account & GCP Project ID**:
+  - An active Google Earth Engine account.
+  - A registered Google Cloud Platform (GCP) Project ID with the Earth Engine API enabled (e.g. `aquadetect-504614` configured in `backend/app/services/earth_engine.py`).
 
 ---
 
@@ -161,11 +164,19 @@ AquaDetect combines geospatial frontend interactive mapping with Python raster p
    pip install -r requirements.txt
    ```
 
-4. Start the FastAPI backend server:
+4. **Authenticate Google Earth Engine (Required for GEE features)**:
+   Authenticate your local environment with your Google Earth Engine credentials:
+   ```bash
+   earthengine authenticate
+   ```
+   > **Note on Project ID**: The application uses a Google Earth Engine Cloud Project ID to initialize `ee.Initialize(project="YOUR_PROJECT_ID")`. Update the `PROJECT_ID` constant in [`backend/app/services/earth_engine.py`](file:///c:/Users/Dhivyabharathi%20G/Desktop/a/backend/app/services/earth_engine.py#L8) with your GCP project ID if using a custom Google Earth Engine project.
+
+5. Start the FastAPI backend server:
    ```bash
    uvicorn app.main:app --reload --port 8000
    ```
    The backend API will be available at `http://127.0.0.1:8000`. API docs can be accessed at `http://127.0.0.1:8000/docs`.
+
 
 ---
 
