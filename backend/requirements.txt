@@ -8,4 +8,6 @@ scipy
 python-multipart
 geopandas
 fiona
-pyproj
+pyproj
+pyogrio
+pyshp

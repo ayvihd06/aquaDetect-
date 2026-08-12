@@ -350,49 +350,192 @@ def export_geojson(layers_dict: Dict[str, Dict[str, Any]], target_layer: str = "
 
 def export_geopackage(layers_dict: Dict[str, Dict[str, Any]], target_layer: str = "all") -> bytes:
     """
-    Generates a multi-layer GeoPackage (.gpkg) file using GeoPandas + pyogrio.
+    Generates a multi-layer GeoPackage (.gpkg) file.
+    Tries GeoPandas + pyogrio first; falls back to pure Python sqlite3 if GDAL C-libraries are blocked.
     """
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            written_layers = 0
+            for layer_name, layer_info in layers_dict.items():
+                if not layer_info["allow_spatial"]:
+                    continue
+
+                if target_layer != "all" and layer_name != target_layer:
+                    continue
+
+                features = layer_info["geojson"].get("features", [])
+                if not features:
+                    gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+                else:
+                    gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
+
+                for meta_k, meta_v in layer_info["metadata"].items():
+                    if isinstance(meta_v, (str, int, float, bool)) and meta_k not in gdf.columns:
+                        gdf[meta_k] = meta_v
+
+                try:
+                    gdf.to_file(tmp_path, layer=layer_name, driver="GPKG", engine="pyogrio")
+                except Exception:
+                    gdf.to_file(tmp_path, layer=layer_name, driver="GPKG")
+
+                written_layers += 1
+
+            if written_layers == 0:
+                gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+                gdf.to_file(tmp_path, layer="empty_export", driver="GPKG")
+
+            with open(tmp_path, "rb") as f:
+                content = f.read()
+
+            return content
+
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.warning(f"GeoPandas GPKG export failed ({exc}). Using pure-Python sqlite3 fallback.")
+        return _export_geopackage_sqlite(layers_dict, target_layer)
+
+
+def _export_geopackage_sqlite(layers_dict: Dict[str, Dict[str, Any]], target_layer: str = "all") -> bytes:
+    """
+    Pure Python fallback for GeoPackage (.gpkg) file creation using built-in sqlite3 and shapely.
+    Does not require GDAL/pyogrio/fiona DLLs.
+    """
+    import sqlite3
+    import struct
+    import re
+
     with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
         tmp_path = tmp.name
 
     try:
-        written_layers = 0
+        conn = sqlite3.connect(tmp_path)
+        c = conn.cursor()
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS gpkg_spatial_ref_sys (
+                srs_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL PRIMARY KEY,
+                organization TEXT NOT NULL,
+                organization_coordsys_id INTEGER NOT NULL,
+                definition TEXT NOT NULL,
+                description TEXT
+            );
+        """)
+        c.execute("""
+            INSERT OR REPLACE INTO gpkg_spatial_ref_sys VALUES (
+                'Undefined Cartesian', -1, 'NONE', -1, 'undefined', 'undefined cartesian SRS'
+            ), (
+                'Undefined Geographic', 0, 'NONE', 0, 'undefined', 'undefined geographic SRS'
+            ), (
+                'WGS 84', 4326, 'EPSG', 4326, 
+                'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]',
+                'longitude/latitude coordinates in degrees'
+            );
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS gpkg_contents (
+                table_name TEXT NOT NULL PRIMARY KEY,
+                data_type TEXT NOT NULL,
+                identifier TEXT,
+                description TEXT,
+                last_change TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                min_x REAL, min_y REAL, max_x REAL, max_y REAL,
+                srs_id INTEGER
+            );
+        """)
+
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS gpkg_geometry_columns (
+                table_name TEXT NOT NULL,
+                column_name TEXT NOT NULL,
+                geometry_type_name TEXT NOT NULL,
+                srs_id INTEGER NOT NULL,
+                z INTEGER NOT NULL,
+                m INTEGER NOT NULL,
+                CONSTRAINT pk_geom_cols PRIMARY KEY (table_name, column_name)
+            );
+        """)
+
         for layer_name, layer_info in layers_dict.items():
             if not layer_info["allow_spatial"]:
                 continue
-
             if target_layer != "all" and layer_name != target_layer:
                 continue
 
             features = layer_info["geojson"].get("features", [])
-            if not features:
-                # Write empty GeoDataFrame schema if no features
-                gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-            else:
-                gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
+            safe_table_name = re.sub(r'[^a-zA-Z0-9_]', '_', layer_name)
 
-            # Attach metadata as layer columns if scalar
-            for meta_k, meta_v in layer_info["metadata"].items():
-                if isinstance(meta_v, (str, int, float, bool)) and meta_k not in gdf.columns:
-                    gdf[meta_k] = meta_v
+            prop_keys = []
+            for feat in features:
+                for k in feat.get("properties", {}).keys():
+                    safe_k = re.sub(r'[^a-zA-Z0-9_]', '_', k)
+                    if safe_k not in prop_keys:
+                        prop_keys.append(safe_k)
 
-            try:
-                gdf.to_file(tmp_path, layer=layer_name, driver="GPKG", engine="pyogrio")
-            except Exception as e:
-                # Fallback to default engine if pyogrio has edge-case issue
-                gdf.to_file(tmp_path, layer=layer_name, driver="GPKG")
+            col_defs = ["fid INTEGER PRIMARY KEY AUTOINCREMENT", "geom BLOB"]
+            for k in prop_keys:
+                col_defs.append(f'"{k}" TEXT')
 
-            written_layers += 1
+            c.execute(f'CREATE TABLE "{safe_table_name}" ({", ".join(col_defs)});')
 
-        if written_layers == 0:
-            # Fallback empty layer
-            gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
-            gdf.to_file(tmp_path, layer="empty_export", driver="GPKG", engine="pyogrio")
+            min_x, min_y, max_x, max_y = 180.0, 90.0, -180.0, -90.0
+            geom_type = "POLYGON"
+
+            for feat in features:
+                geom_dict = feat.get("geometry")
+                props = feat.get("properties", {})
+
+                gpkg_blob = None
+                if geom_dict:
+                    try:
+                        g = shape(geom_dict)
+                        if not g.is_empty:
+                            geom_type = g.geom_type.upper()
+                            bounds = g.bounds
+                            min_x = min(min_x, bounds[0])
+                            min_y = min(min_y, bounds[1])
+                            max_x = max(max_x, bounds[2])
+                            max_y = max(max_y, bounds[3])
+
+                            header = b"GP\x00\x00" + struct.pack("<i", 4326)
+                            gpkg_blob = header + g.wkb
+                    except Exception:
+                        pass
+
+                vals = [gpkg_blob] + [str(props.get(k, "")) if props.get(k) is not None else None for k in prop_keys]
+                placeholders = ", ".join(["?"] * len(vals))
+                cols_str = ", ".join(['"geom"'] + [f'"{k}"' for k in prop_keys])
+                c.execute(f'INSERT INTO "{safe_table_name}" ({cols_str}) VALUES ({placeholders})', vals)
+
+            if min_x > max_x:
+                min_x, min_y, max_x, max_y = 0.0, 0.0, 0.0, 0.0
+
+            c.execute("""
+                INSERT OR REPLACE INTO gpkg_contents 
+                (table_name, data_type, identifier, description, min_x, min_y, max_x, max_y, srs_id)
+                VALUES (?, 'features', ?, ?, ?, ?, ?, ?, 4326)
+            """, (safe_table_name, safe_table_name, f"AquaDetect {layer_name} layer", min_x, min_y, max_x, max_y))
+
+            c.execute("""
+                INSERT OR REPLACE INTO gpkg_geometry_columns
+                (table_name, column_name, geometry_type_name, srs_id, z, m)
+                VALUES (?, 'geom', ?, 4326, 0, 0)
+            """, (safe_table_name, geom_type))
+
+        conn.commit()
+        conn.close()
 
         with open(tmp_path, "rb") as f:
-            content = f.read()
-
-        return content
+            return f.read()
 
     finally:
         if os.path.exists(tmp_path):
@@ -406,49 +549,136 @@ def export_shapefile_zip(layers_dict: Dict[str, Dict[str, Any]], target_layer: s
     """
     Generates a Shapefile ZIP archive containing .shp, .shx, .dbf, .prj for layers.
     Truncates column names to <=10 chars using SHP_FIELD_MAPPINGS.
+    Tries GeoPandas + pyogrio first; falls back to pure Python pyshp if GDAL C-libraries are blocked.
     """
+    try:
+        temp_dir = tempfile.mkdtemp()
+        zip_buffer = io.BytesIO()
+
+        try:
+            written_shapefiles = 0
+
+            for layer_name, layer_info in layers_dict.items():
+                if not layer_info["allow_spatial"]:
+                    continue
+
+                if target_layer != "all" and layer_name != target_layer:
+                    continue
+
+                features = layer_info["geojson"].get("features", [])
+                if features:
+                    gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
+                else:
+                    gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+
+                col_rename = {}
+                for col in gdf.columns:
+                    if col == "geometry":
+                        continue
+                    if col in SHP_FIELD_MAPPINGS:
+                        col_rename[col] = SHP_FIELD_MAPPINGS[col]
+                    elif len(col) > 10:
+                        col_rename[col] = col[:10]
+
+                gdf = gdf.rename(columns=col_rename)
+
+                shp_path = os.path.join(temp_dir, f"{layer_name}.shp")
+                try:
+                    gdf.to_file(shp_path, driver="ESRI Shapefile", engine="pyogrio")
+                except Exception:
+                    gdf.to_file(shp_path, driver="ESRI Shapefile")
+
+                written_shapefiles += 1
+
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, _, files in os.walk(temp_dir):
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        arcname = os.path.relpath(full_path, temp_dir)
+                        zf.write(full_path, arcname=arcname)
+
+            zip_buffer.seek(0)
+            return zip_buffer.getvalue()
+
+        finally:
+            for root, dirs, files in os.walk(temp_dir, topdown=False):
+                for file in files:
+                    os.remove(os.path.join(root, file))
+                for d in dirs:
+                    os.rmdir(os.path.join(root, d))
+            os.rmdir(temp_dir)
+
+    except Exception as exc:
+        logger.warning(f"GeoPandas Shapefile export failed ({exc}). Using pure-Python pyshp fallback.")
+        return _export_shapefile_pyshp(layers_dict, target_layer)
+
+
+def _export_shapefile_pyshp(layers_dict: Dict[str, Dict[str, Any]], target_layer: str = "all") -> bytes:
+    """
+    Pure Python fallback for Shapefile ZIP generation using pyshp library.
+    Does not require GDAL/Fiona/pyogrio native C-libraries or DLLs.
+    """
+    import shapefile
+
     temp_dir = tempfile.mkdtemp()
     zip_buffer = io.BytesIO()
 
-    try:
-        written_shapefiles = 0
+    WGS84_PRJ = (
+        'GEOGCS["GCS_WGS_1984",DATUM["D_WGS_1984",SPHEROID["WGS_1984",6378137.0,298.257223563]],'
+        'PRIMEM["Greenwich",0.0],UNIT["Degree",0.0174532925199433]]'
+    )
 
+    try:
         for layer_name, layer_info in layers_dict.items():
             if not layer_info["allow_spatial"]:
                 continue
-
             if target_layer != "all" and layer_name != target_layer:
                 continue
 
             features = layer_info["geojson"].get("features", [])
-            if features:
-                gdf = gpd.GeoDataFrame.from_features(features, crs="EPSG:4326")
-            else:
-                gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+            base_path = os.path.join(temp_dir, layer_name)
+            
+            w = shapefile.Writer(base_path, shapeType=shapefile.POLYGON)
 
-            # Column name truncation mapping for Shapefile DBF limit (10 chars)
-            col_rename = {}
-            for col in gdf.columns:
-                if col == "geometry":
-                    continue
-                if col in SHP_FIELD_MAPPINGS:
-                    col_rename[col] = SHP_FIELD_MAPPINGS[col]
-                elif len(col) > 10:
-                    col_rename[col] = col[:10]
+            field_keys = []
+            for feat in features:
+                props = feat.get("properties", {})
+                for k in props.keys():
+                    if k not in field_keys:
+                        field_keys.append(k)
 
-            gdf = gdf.rename(columns=col_rename)
+            dbf_fields = []
+            for fk in field_keys:
+                field_name = SHP_FIELD_MAPPINGS.get(fk, fk[:10] if len(fk) > 10 else fk)
+                w.field(field_name, "C", size=254)
+                dbf_fields.append(fk)
 
-            # Export shapefile
-            shp_path = os.path.join(temp_dir, f"{layer_name}.shp")
-            try:
-                gdf.to_file(shp_path, driver="ESRI Shapefile", engine="pyogrio")
-            except Exception:
-                gdf.to_file(shp_path, driver="ESRI Shapefile")
+            if not dbf_fields:
+                w.field("id", "N")
 
-            written_shapefiles += 1
+            for feat in features:
+                geom = feat.get("geometry")
+                props = feat.get("properties", {})
 
+                if geom and geom.get("coordinates"):
+                    try:
+                        w.shape(geom)
+                    except Exception:
+                        w.null()
+                else:
+                    w.null()
 
-        # Package temp_dir into ZIP
+                if dbf_fields:
+                    rec_vals = [str(props.get(fk, "")) for fk in dbf_fields]
+                    w.record(*rec_vals)
+                else:
+                    w.record(1)
+
+            w.close()
+
+            with open(f"{base_path}.prj", "w") as prj_file:
+                prj_file.write(WGS84_PRJ)
+
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
             for root, _, files in os.walk(temp_dir):
                 for file in files:
@@ -460,13 +690,13 @@ def export_shapefile_zip(layers_dict: Dict[str, Dict[str, Any]], target_layer: s
         return zip_buffer.getvalue()
 
     finally:
-        # Cleanup temp directory
         for root, dirs, files in os.walk(temp_dir, topdown=False):
             for file in files:
                 os.remove(os.path.join(root, file))
             for d in dirs:
                 os.rmdir(os.path.join(root, d))
         os.rmdir(temp_dir)
+
 
 
 def export_csv(layers_dict: Dict[str, Dict[str, Any]], target_layer: str = "all") -> bytes:
