@@ -11,6 +11,11 @@ import area from "@turf/area";
 import bbox from "@turf/bbox";
 
 import ImageAnalysisPanel from "./ImageAnalysisPanel";
+import WaterChangePanel from "./WaterChangePanel";
+import HydrologyPanel from "./HydrologyPanel";
+import GISExportPanel from "./GISExportPanel";
+
+
 
 
 // =========================================================
@@ -131,6 +136,8 @@ function MapFitBounds({ geojson }) {
 // =========================================================
 
 function MapView({
+  analysisMode,        // controlled from Home via Navbar
+  onModeChange,        // callback to update Home state
   onDistrictSelect,
   onWaterBodySelect,
 }) {
@@ -149,13 +156,8 @@ function MapView({
   const [hoveredWaterBody, setHoveredWaterBody] =
     useState(null);
 
-
-  // =======================================================
-  // ANALYSIS MODE
-  // =======================================================
-
-  const [analysisMode, setAnalysisMode] =
-    useState("district"); // "district" | "image"
+  // Stores latest result output for each analysis mode for GIS export
+  const [lastResults, setLastResults] = useState({});
 
 
   // =======================================================
@@ -170,6 +172,18 @@ function MapView({
 
   // Key to force GeoJSON layer remount when ndwiGeojson changes
   const ndwiKeyRef = useRef(0);
+
+  // Water Change Analysis state
+  const [changeResult, setChangeResult] = useState(null);
+  const [activeLayer, setActiveLayer] = useState("change"); // "change" | "before_rgb" | "after_rgb" | "before_ndwi" | "after_ndwi" | "before_mask" | "after_mask" | flood / drought layers
+  const changeKeyRef = useRef(0);
+
+  // Hydrology (Flood & Drought Monitoring) state
+  const [floodResult, setFloodResult] = useState(null);
+  const [droughtResult, setDroughtResult] = useState(null);
+  const floodKeyRef = useRef(0);
+
+
 
 
   const [districtStats, setDistrictStats] =
@@ -277,6 +291,14 @@ function MapView({
 
 
         setGeojson(data);
+        setLastResults((prev) => ({
+          ...prev,
+          district: {
+            district: selectedDistrict?.name || "Madurai",
+            source: "AquaDetect Static Water Database",
+            geojson: data,
+          },
+        }));
 
 
         // =================================================
@@ -1127,6 +1149,11 @@ function MapView({
     setNdwiStats(stats);
     setLocalSelectedWaterBody(null);
     if (onWaterBodySelect) onWaterBodySelect(null);
+    setLastResults((prev) => ({
+      ...prev,
+      ndwi: { geojson, statistics: stats, satellite_source: "Sentinel-2 Surface Reflectance", spatial_resolution_m: 10, detection_method: "NDWI (B3, B8)" },
+      image: { geojson, statistics: stats, satellite_source: "Sentinel-2 Surface Reflectance", spatial_resolution_m: 10, detection_method: "NDWI (B3, B8)" },
+    }));
   };
 
 
@@ -1134,27 +1161,65 @@ function MapView({
   // MODE SWITCH HANDLER
   // =======================================================
 
-  const handleModeSwitch = (mode) => {
-    setAnalysisMode(mode);
+  // =======================================================
+  // STATE CLEANUP HELPER
+  // =======================================================
+
+  // Called when the mode changes (either from navbar prop or from a child component).
+  // Clears result/layer state that belongs to the previous mode.
+  const cleanupForMode = (mode) => {
     setLocalSelectedWaterBody(null);
     setHoveredWaterBody(null);
     if (onWaterBodySelect) onWaterBodySelect(null);
 
     if (mode === "district") {
-      // Clear NDWI layer when switching to district mode
       setNdwiGeojson(null);
       setNdwiStats(null);
-    } else {
-      // Clear district layer when switching to image mode
+      setChangeResult(null);
+      setFloodResult(null);
+      setDroughtResult(null);
+    } else if (mode === "ndwi") {
       setGeojson(null);
-      setSelectedDistrict(null);
-      setDistrictStats({
-        totalWaterAreaKm2: 0,
-        waterBodyCount:    0,
-        boundingBoxCount:  0,
-      });
+      setChangeResult(null);
+      setFloodResult(null);
+      setDroughtResult(null);
+    } else if (mode === "water-change") {
+      setNdwiGeojson(null);
+      setNdwiStats(null);
+      setFloodResult(null);
+      setDroughtResult(null);
+    } else if (mode === "flood") {
+      setGeojson(null);
+      setNdwiGeojson(null);
+      setNdwiStats(null);
+      setChangeResult(null);
+      setDroughtResult(null);
+    } else if (mode === "drought") {
+      setGeojson(null);
+      setNdwiGeojson(null);
+      setNdwiStats(null);
+      setChangeResult(null);
+      setFloodResult(null);
     }
   };
+
+  // handleModeSwitch — used by any child component that needs to request a mode change.
+  // It notifies Home (via onModeChange) which updates the navbar and re-renders MapView
+  // with the new analysisMode prop, which then triggers the effect below.
+  const handleModeSwitch = (mode) => {
+    if (onModeChange) onModeChange(mode);
+  };
+
+  // When analysisMode prop changes (navbar click), clean up stale state for the previous mode.
+  const prevModeRef = useRef(null);
+  useEffect(() => {
+    if (prevModeRef.current !== analysisMode) {
+      prevModeRef.current = analysisMode;
+      cleanupForMode(analysisMode);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysisMode]);
+
 
 
   // =======================================================
@@ -1203,61 +1268,6 @@ function MapView({
           boxSizing: "border-box",
         }}
       >
-
-        {/* ===============================================
-            MODE TOGGLE
-            =============================================== */}
-
-        <div
-          style={{
-            fontSize: "11px",
-            fontWeight: 700,
-            color: "#6b7280",
-            letterSpacing: "0.5px",
-            textTransform: "uppercase",
-            marginBottom: "10px",
-          }}
-        >
-          ANALYSIS MODE
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            marginBottom: "20px",
-            background: "#f1f5f9",
-            borderRadius: "8px",
-            padding: "4px",
-          }}
-        >
-          {["district", "image"].map((mode) => (
-            <button
-              key={mode}
-              onClick={() => handleModeSwitch(mode)}
-              style={{
-                flex: 1,
-                padding: "8px 12px",
-                borderRadius: "6px",
-                border: "none",
-                cursor: "pointer",
-                fontSize: "13px",
-                fontWeight: 600,
-                background: analysisMode === mode
-                  ? "#0b409c"
-                  : "transparent",
-                color: analysisMode === mode
-                  ? "#ffffff"
-                  : "#4b5563",
-                boxShadow: analysisMode === mode
-                  ? "0 2px 4px rgba(11, 64, 156, 0.25)"
-                  : "none",
-                transition: "all 0.15s ease",
-              }}
-            >
-              {mode === "district" ? "District Analysis" : "Image Analysis"}
-            </button>
-          ))}
-        </div>
 
 
         {/* ===============================================
@@ -1803,10 +1813,10 @@ function MapView({
 
 
         {/* ===============================================
-            IMAGE ANALYSIS PANEL
+            NDWI IMAGE ANALYSIS PANEL
             =============================================== */}
 
-        {analysisMode === "image" && (
+        {analysisMode === "ndwi" && (
 
           <ImageAnalysisPanel
             onNdwiResult={handleNdwiResult}
@@ -1816,10 +1826,100 @@ function MapView({
 
 
         {/* ===============================================
-            NDWI SELECTED WATER BODY (image mode)
+            WATER CHANGE ANALYSIS PANEL
             =============================================== */}
 
-        {analysisMode === "image" &&
+        {analysisMode === "water-change" && (
+
+          <WaterChangePanel
+            selectedDistrictName={selectedDistrict?.name || "Madurai"}
+            onDistrictSelect={(dName) => {
+              const found = DISTRICTS.find((d) => d.name.toLowerCase() === dName.toLowerCase());
+              if (found) setSelectedDistrict(found);
+            }}
+            onChangeResult={(data) => {
+              changeKeyRef.current += 1;
+              setChangeResult(data);
+              setActiveLayer("change");
+              setLastResults((prev) => ({ ...prev, change: data, "water-change": data }));
+            }}
+            activeLayer={activeLayer}
+            onLayerSelect={(layerId) => setActiveLayer(layerId)}
+          />
+
+        )}
+
+
+        {/* ===============================================
+            FLOOD MONITORING PANEL
+            =============================================== */}
+
+        {analysisMode === "flood" && (
+
+          <HydrologyPanel
+            activeTab="flood"
+            selectedDistrictName={selectedDistrict?.name || "Madurai"}
+            onFloodResult={(data) => {
+              floodKeyRef.current += 1;
+              setFloodResult(data);
+              if (data && data.tiles) {
+                setActiveLayer("flood_extent");
+              }
+              setLastResults((prev) => ({ ...prev, flood: data }));
+            }}
+            onDroughtResult={() => {}}
+            activeLayer={activeLayer}
+            onLayerSelect={(layerId) => setActiveLayer(layerId)}
+          />
+
+        )}
+
+
+        {/* ===============================================
+            DROUGHT MONITORING PANEL
+            =============================================== */}
+
+        {analysisMode === "drought" && (
+
+          <HydrologyPanel
+            activeTab="drought"
+            selectedDistrictName={selectedDistrict?.name || "Madurai"}
+            onFloodResult={() => {}}
+            onDroughtResult={(data) => {
+              setDroughtResult(data);
+              if (data && data.tiles && data.tiles.current_rgb) {
+                setActiveLayer("drought_current_rgb");
+              }
+              setLastResults((prev) => ({ ...prev, drought: data }));
+            }}
+            activeLayer={activeLayer}
+            onLayerSelect={(layerId) => setActiveLayer(layerId)}
+          />
+
+        )}
+
+
+        {/* ===============================================
+            GIS EXPORT PANEL
+            =============================================== */}
+
+        {analysisMode === "gis-export" && (
+
+          <GISExportPanel
+            lastResults={lastResults}
+            selectedDistrictName={selectedDistrict?.name || "Madurai"}
+          />
+
+        )}
+
+
+
+
+        {/* ===============================================
+            NDWI SELECTED WATER BODY (ndwi mode)
+            =============================================== */}
+
+        {analysisMode === "ndwi" &&
           selectedWaterBody && (
 
           <div
@@ -2084,7 +2184,248 @@ function MapView({
 
         )}
 
+
+        {/* GEE SATELLITE VALIDATION TILE LAYERS */}
+        {analysisMode === "water-change" && changeResult && changeResult.tiles && (
+          <>
+            {activeLayer === "before_rgb" && changeResult.tiles.before_rgb && (
+              <TileLayer key="b_rgb" url={changeResult.tiles.before_rgb} opacity={1.0} zIndex={500} />
+            )}
+            {activeLayer === "after_rgb" && changeResult.tiles.after_rgb && (
+              <TileLayer key="a_rgb" url={changeResult.tiles.after_rgb} opacity={1.0} zIndex={500} />
+            )}
+            {activeLayer === "before_ndwi" && changeResult.tiles.before_ndwi && (
+              <TileLayer key="b_ndwi" url={changeResult.tiles.before_ndwi} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "after_ndwi" && changeResult.tiles.after_ndwi && (
+              <TileLayer key="a_ndwi" url={changeResult.tiles.after_ndwi} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "before_mask" && changeResult.tiles.before_mask && (
+              <TileLayer key="b_mask" url={changeResult.tiles.before_mask} opacity={0.8} zIndex={500} />
+            )}
+            {activeLayer === "after_mask" && changeResult.tiles.after_mask && (
+              <TileLayer key="a_mask" url={changeResult.tiles.after_mask} opacity={0.8} zIndex={500} />
+            )}
+          </>
+        )}
+
+        {/* WATER CHANGE POLYGONS */}
+        {analysisMode === "water-change" && activeLayer === "change" && changeResult && changeResult.geojson && (
+          <>
+            <MapFitBounds geojson={changeResult.geojson.loss} />
+
+            {/* Stable Water Polygons (Blue) */}
+            {changeResult.geojson.stable && changeResult.geojson.stable.features?.length > 0 && (
+              <GeoJSON
+                key={`stable-${changeKeyRef.current}`}
+                data={changeResult.geojson.stable}
+                style={{ color: "#1D4ED8", fillColor: "#2563EB", fillOpacity: 0.55, weight: 1.5 }}
+                onEachFeature={(feat, layer) => {
+                  layer.bindPopup(`
+                    <div style="font-family: sans-serif; font-size: 12px;">
+                      <strong style="color: #1E40AF;">🔵 Stable Water Region</strong><br/>
+                      <strong>Area:</strong> ${feat.properties?.area_km2 || 0} km²<br/>
+                      <strong>Detected Before:</strong> Yes<br/>
+                      <strong>Detected After:</strong> Yes
+                    </div>
+                  `);
+                }}
+              />
+            )}
+
+            {/* Water Loss Polygons (Red) */}
+            {changeResult.geojson.loss && changeResult.geojson.loss.features?.length > 0 && (
+              <GeoJSON
+                key={`loss-${changeKeyRef.current}`}
+                data={changeResult.geojson.loss}
+                style={{ color: "#991B1B", fillColor: "#DC2626", fillOpacity: 0.7, weight: 2 }}
+                onEachFeature={(feat, layer) => {
+                  layer.bindPopup(`
+                    <div style="font-family: sans-serif; font-size: 12px;">
+                      <strong style="color: #991B1B;">🔴 Water Loss Region</strong><br/>
+                      <strong>Area:</strong> ${feat.properties?.area_km2 || 0} km²<br/>
+                      <strong>Detected Before:</strong> Yes<br/>
+                      <strong>Detected After:</strong> No
+                    </div>
+                  `);
+                }}
+              />
+            )}
+
+            {/* Water Gain Polygons (Green) */}
+            {changeResult.geojson.gain && changeResult.geojson.gain.features?.length > 0 && (
+              <GeoJSON
+                key={`gain-${changeKeyRef.current}`}
+                data={changeResult.geojson.gain}
+                style={{ color: "#15803D", fillColor: "#16A34A", fillOpacity: 0.7, weight: 2 }}
+                onEachFeature={(feat, layer) => {
+                  layer.bindPopup(`
+                    <div style="font-family: sans-serif; font-size: 12px;">
+                      <strong style="color: #166534;">🟢 Water Gain Region</strong><br/>
+                      <strong>Area:</strong> ${feat.properties?.area_km2 || 0} km²<br/>
+                      <strong>Detected Before:</strong> No<br/>
+                      <strong>Detected After:</strong> Yes
+                    </div>
+                  `);
+                }}
+              />
+            )}
+          </>
+        )}
+
+        {/* FLOOD MONITORING TILE LAYERS */}
+        {analysisMode === "flood" && floodResult && floodResult.tiles && (
+          <>
+            {activeLayer === "flood_before_sar" && floodResult.tiles.before_sar && (
+              <TileLayer key="f_b_sar" url={floodResult.tiles.before_sar} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "flood_after_sar" && floodResult.tiles.after_sar && (
+              <TileLayer key="f_a_sar" url={floodResult.tiles.after_sar} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "flood_sar_change" && floodResult.tiles.sar_change && (
+              <TileLayer key="f_sar_chg" url={floodResult.tiles.sar_change} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "flood_perm_water" && floodResult.tiles.permanent_water && (
+              <TileLayer key="f_perm_w" url={floodResult.tiles.permanent_water} opacity={0.8} zIndex={500} />
+            )}
+            {activeLayer === "flood_extent" && floodResult.tiles.flood_extent && (
+              <TileLayer key="f_ext_tile" url={floodResult.tiles.flood_extent} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "flood_stable_water" && floodResult.tiles.stable_water && (
+              <TileLayer key="f_stable_w" url={floodResult.tiles.stable_water} opacity={0.8} zIndex={500} />
+            )}
+          </>
+        )}
+
+        {/* FLOOD EXTENT GEOJSON VECTOR LAYER */}
+        {analysisMode === "flood" && (activeLayer === "flood_geojson" || (activeLayer === "flood_extent" && !floodResult?.tiles?.flood_extent)) && floodResult && floodResult.flood_geojson && floodResult.flood_geojson.features?.length > 0 && (
+          <>
+            <MapFitBounds geojson={floodResult.flood_geojson} />
+            <GeoJSON
+              key={`flood-geojson-${floodKeyRef.current}`}
+              data={floodResult.flood_geojson}
+              style={{ color: "#7B1FA2", fillColor: "#9C27B0", fillOpacity: 0.7, weight: 2 }}
+              onEachFeature={(feat, layer) => {
+                layer.bindPopup(`
+                  <div style="font-family: sans-serif; font-size: 12px;">
+                    <strong style="color: #7B1FA2;">🟣 Potential Flood Extent</strong><br/>
+                    <strong>Detection:</strong> Sentinel-1 SAR VV &lt; ${floodResult.sar_threshold_db} dB<br/>
+                    <strong>Permanent Water Excluded:</strong> Yes (JRC GSW)<br/>
+                    <strong>Status:</strong> Unconfirmed Satellite Indicator
+                  </div>
+                `);
+              }}
+            />
+          </>
+        )}
+
+        {/* DROUGHT MONITORING TILE LAYERS */}
+        {analysisMode === "drought" && droughtResult && droughtResult.tiles && (
+          <>
+            {activeLayer === "drought_current_rgb" && droughtResult.tiles.current_rgb && (
+              <TileLayer key="d_rgb" url={droughtResult.tiles.current_rgb} opacity={1.0} zIndex={500} />
+            )}
+            {activeLayer === "drought_current_ndwi" && droughtResult.tiles.current_ndwi && (
+              <TileLayer key="d_ndwi" url={droughtResult.tiles.current_ndwi} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "drought_current_ndvi" && droughtResult.tiles.current_ndvi && (
+              <TileLayer key="d_ndvi" url={droughtResult.tiles.current_ndvi} opacity={0.9} zIndex={500} />
+            )}
+            {activeLayer === "drought_current_water" && droughtResult.tiles.current_water && (
+              <TileLayer key="d_water" url={droughtResult.tiles.current_water} opacity={0.8} zIndex={500} />
+            )}
+          </>
+        )}
+
+
       </MapContainer>
+
+      {/* MAP BANNER FOR SATELLITE INSPECTION LAYERS */}
+      {analysisMode === "water-change" && activeLayer !== "change" && (
+        <div
+          style={{
+            position: "absolute",
+            top: "20px",
+            right: "20px",
+            zIndex: 1000,
+            background: "rgba(15, 23, 42, 0.92)",
+            color: "#FFFFFF",
+            padding: "10px 16px",
+            borderRadius: "8px",
+            boxShadow: "0 4px 14px rgba(0,0,0,0.3)",
+            fontSize: "12px",
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+          }}
+        >
+          <span>
+            {activeLayer.includes("rgb")
+              ? "🛰️ Sentinel-2 RGB Preview (Visual Reference — B4, B3, B2)"
+              : activeLayer.includes("ndwi")
+                ? "🌊 NDWI Spectral Layer (Algorithm Output — B3 & B8)"
+                : "💧 Binary Water Mask (NDWI >= Threshold)"}
+          </span>
+          <button
+            onClick={() => setActiveLayer("change")}
+            style={{
+              background: "#2563EB",
+              color: "#FFF",
+              border: "none",
+              borderRadius: "4px",
+              padding: "4px 10px",
+              fontSize: "11px",
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            ← Return to Change Map
+          </button>
+        </div>
+      )}
+
+      {/* MAP LEGEND (Water Change Mode) */}
+      {analysisMode === "water-change" && activeLayer === "change" && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: "30px",
+            right: "20px",
+            zIndex: 1000,
+            background: "rgba(255, 255, 255, 0.95)",
+            padding: "10px 14px",
+            borderRadius: "8px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+            fontSize: "12px",
+            fontWeight: 600,
+            display: "flex",
+            flexDirection: "column",
+            gap: "6px",
+            color: "#1E293B",
+          }}
+        >
+          <div style={{ fontSize: "11px", color: "#64748B", textTransform: "uppercase", letterSpacing: "0.5px" }}>Change Map Legend</div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ width: "12px", height: "12px", borderRadius: "2px", backgroundColor: "#DC2626", display: "inline-block" }}></span>
+            <span>🔴 Water Loss</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ width: "12px", height: "12px", borderRadius: "2px", backgroundColor: "#16A34A", display: "inline-block" }}></span>
+            <span>🟢 Water Gain</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ width: "12px", height: "12px", borderRadius: "2px", backgroundColor: "#2563EB", display: "inline-block" }}></span>
+            <span>🔵 Stable Water</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{ width: "12px", height: "12px", borderRadius: "2px", backgroundColor: "#9CA3AF", display: "inline-block" }}></span>
+            <span>⚪ No Data / Cloud</span>
+          </div>
+        </div>
+      )}
+
+
 
     </div>
   );

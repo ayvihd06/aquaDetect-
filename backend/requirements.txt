@@ -6,3 +6,6 @@ shapely
 numpy
 scipy
 python-multipart
+geopandas
+fiona
+pyproj

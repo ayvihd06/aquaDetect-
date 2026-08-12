@@ -19,3 +19,11 @@ backend/*/*/*/__pycache__/
 .env.local
 .DS_Store
 Thumbs.db
+
+# Test outputs & caches
+backend/cache/
+backend/outputs/
+backend/uploads/
+backend/test.gpkg
+backend/test_shp.zip
+

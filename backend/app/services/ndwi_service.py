@@ -1,46 +1,41 @@
 """
-NDWI Service
-============
+NDWI Service (GeoTIFF Upload Pipeline)
+=======================================
 
 Handles:
-1. Raster band inspection (reads GeoTIFF metadata to identify spectral bands)
-2. NDWI calculation from Green and NIR bands
-3. Water mask generation and noise cleaning
-4. Polygonization of detected water bodies
-5. Statistic calculation
+  1. Raster band inspection — reads GeoTIFF metadata to identify B3/B8
+  2. Delegates all water classification to water_detection.py
+  3. Supports manual and adaptive (Otsu) threshold modes
+  4. Returns full scientific metadata with every response
+
+Scientific note:
+  Results are described as "Sentinel-2 derived surface-water extent".
+  They are NOT ground truth and must not be described as such.
 """
 
 import io
 import logging
-import math
+from typing import Optional
 
 import numpy as np
 import rasterio
-from rasterio.features import shapes
-from scipy.ndimage import binary_opening, label
-from shapely.geometry import shape, mapping
-from shapely.validation import make_valid
+from rasterio.crs import CRS
 
+from app.services.water_detection import (
+    compute_ndwi,
+    compute_ndwi_stats,
+    compute_otsu_threshold,
+    create_raw_water_mask,
+    clean_water_mask,
+    polygonize_water_mask,
+    check_extent_plausibility,
+    compute_detection_quality,
+    S2_SPATIAL_RESOLUTION_M,
+)
 
 logger = logging.getLogger(__name__)
 
-
-# =========================================================
-# CONSTANTS
-# =========================================================
-
 MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024  # 500 MB
-
-# Sentinel-2 band identifiers
-S2_GREEN_NAMES = {"b3", "green", "band3", "band_3", "s2_b3"}
-S2_NIR_NAMES   = {"b8", "nir", "band8", "band_8", "s2_b8", "nir_broad", "b8a"}
-
-# Minimum connected-pixel area to keep (removes tiny noise specks)
-# Expressed in pixels — configurable
-DEFAULT_MIN_PIXELS = 10
-
-# Geometry simplification tolerance (degrees) for browser performance
-SIMPLIFY_TOLERANCE = 0.00005
 
 
 # =========================================================
@@ -49,91 +44,56 @@ SIMPLIFY_TOLERANCE = 0.00005
 
 def inspect_raster_bands(file_bytes: bytes) -> dict:
     """
-    Open a GeoTIFF and return information about each band.
-
-    Returns
-    -------
-    dict with keys:
-        band_count   : int
-        bands        : list of { index: int (1-based), description: str|None, color_interp: str }
-        auto_green   : int|None  — 1-based band index if Green detected
-        auto_nir     : int|None  — 1-based band index if NIR detected
-        auto_detected: bool
-        crs          : str|None
-        transform    : list|None
+    Open a GeoTIFF and return band metadata.
+    Attempts to auto-identify the Sentinel-2 Green (B3) and NIR (B8) bands.
     """
     try:
         with rasterio.open(io.BytesIO(file_bytes)) as src:
             band_count = src.count
             bands_info = []
-
             auto_green = None
             auto_nir   = None
 
             for i in range(1, band_count + 1):
                 desc = src.descriptions[i - 1] or ""
                 color_interp = str(src.colorinterp[i - 1].name)
-
                 bands_info.append({
                     "index":        i,
                     "description":  desc if desc else None,
                     "color_interp": color_interp,
                 })
-
-                # ----- Try to identify Green band -----
                 desc_lower = desc.strip().lower()
 
-                # Substring match: catches "B3 / Green", "B3_green", "Green (B3)", etc.
-                is_green = (
-                    "b3" in desc_lower
-                    or "green" in desc_lower
+                if auto_green is None and (
+                    "b3" in desc_lower or "green" in desc_lower
                     or color_interp.lower() == "green"
-                )
-                if auto_green is None and is_green:
+                ):
                     auto_green = i
 
-                # ----- Try to identify NIR band -----
-                # Substring match: catches "B8 / NIR", "B8_NIR", "nir_broad", etc.
-                # "b8a" is the Red-Edge4 / NIR narrow band — also acceptable as NIR
-                is_nir = (
-                    "b8" in desc_lower      # catches b8 and b8a
-                    or "nir" in desc_lower
+                if auto_nir is None and (
+                    "b8" in desc_lower or "nir" in desc_lower
                     or color_interp.lower() == "nir"
-                )
-                # Exclude "b8a" from taking priority over "b8" if both exist
-                # (we prefer the broader NIR B8 over B8A, but either works)
-                if auto_nir is None and is_nir:
+                ):
                     auto_nir = i
-
-            auto_detected = (auto_green is not None) and (auto_nir is not None)
-
-            crs_str = str(src.crs) if src.crs else None
-            transform_list = list(src.transform) if src.transform else None
 
             return {
                 "band_count":    band_count,
                 "bands":         bands_info,
                 "auto_green":    auto_green,
                 "auto_nir":      auto_nir,
-                "auto_detected": auto_detected,
-                "crs":           crs_str,
-                "transform":     transform_list,
+                "auto_detected": (auto_green is not None) and (auto_nir is not None),
+                "crs":           str(src.crs) if src.crs else None,
+                "transform":     list(src.transform) if src.transform else None,
             }
 
     except rasterio.errors.RasterioIOError as err:
-        logger.error("Rasterio could not open the file: %s", err)
-        raise ValueError(
-            "Invalid satellite image. Please upload a valid multispectral GeoTIFF."
-        )
+        raise ValueError(f"Invalid satellite image: {err}")
     except Exception as err:
-        logger.error("Band inspection failed: %s", err)
-        raise ValueError(
-            f"Could not inspect the uploaded image: {err}"
-        )
+        raise ValueError(f"Could not inspect the uploaded image: {err}")
 
 
 # =========================================================
-# NDWI PROCESSING
+# FULL NDWI DETECTION PIPELINE
 # =========================================================
 
 def process_ndwi_image(
@@ -141,295 +101,173 @@ def process_ndwi_image(
     threshold: float,
     green_band: int,
     nir_band: int,
-    min_pixels: int = DEFAULT_MIN_PIXELS,
+    min_pixels: int = 10,
+    threshold_mode: str = "manual",
+    debug: bool = False,
 ) -> dict:
     """
-    Full NDWI water-detection pipeline.
+    Full NDWI water detection pipeline for an uploaded GeoTIFF.
 
     Parameters
     ----------
-    file_bytes  : Raw bytes of the uploaded GeoTIFF
-    threshold   : NDWI threshold for water classification (e.g. 0.30)
-    green_band  : 1-based band index for the Green spectral band
-    nir_band    : 1-based band index for the NIR spectral band
-    min_pixels  : Minimum connected-pixel count to keep (noise removal)
+    file_bytes      : Raw bytes of the uploaded GeoTIFF
+    threshold       : NDWI threshold when threshold_mode="manual" (default 0.30)
+    green_band      : 1-based raster band index for Green (B3)
+    nir_band        : 1-based raster band index for NIR (B8)
+    min_pixels      : Minimum connected pixels to keep (noise filter)
+    threshold_mode  : "manual" | "adaptive"
+    debug           : If True, include extra diagnostics in response
 
     Returns
     -------
-    dict with keys:
-        success          : bool
-        detection_method : str
-        ndwi_threshold   : float
-        statistics       : dict
-        geojson          : GeoJSON FeatureCollection
+    dict with:
+        success, satellite_source, spatial_resolution_m,
+        selected_threshold, threshold_method, threshold_info,
+        statistics (full NDWI + water + quality diagnostics),
+        validation_flags, geojson, [debug_info]
     """
-
     logger.info(
-        "NDWI processing started — green_band=%d, nir_band=%d, threshold=%.2f",
-        green_band, nir_band, threshold,
+        "NDWI processing — green=%d, nir=%d, threshold=%.3f, mode=%s",
+        green_band, nir_band, threshold, threshold_mode,
     )
 
     try:
         with rasterio.open(io.BytesIO(file_bytes)) as src:
-
-            # ----------------------------------------------------------
-            # Validate band indices
-            # ----------------------------------------------------------
+            # --- Band validation ---
             if green_band < 1 or green_band > src.count:
-                raise ValueError(
-                    f"Green band index {green_band} is out of range "
-                    f"(file has {src.count} band(s))."
-                )
+                raise ValueError(f"Green band {green_band} out of range (file has {src.count} band(s)).")
             if nir_band < 1 or nir_band > src.count:
-                raise ValueError(
-                    f"NIR band index {nir_band} is out of range "
-                    f"(file has {src.count} band(s))."
-                )
+                raise ValueError(f"NIR band {nir_band} out of range (file has {src.count} band(s)).")
             if green_band == nir_band:
-                raise ValueError(
-                    "Green band and NIR band must be different bands."
-                )
+                raise ValueError("Green and NIR band must be different.")
 
-            # ----------------------------------------------------------
-            # Read bands as float32
-            # ----------------------------------------------------------
             green = src.read(green_band).astype(np.float32)
             nir   = src.read(nir_band).astype(np.float32)
+            nodata     = src.nodata
+            transform  = src.transform
+            crs        = src.crs
 
-            nodata = src.nodata
-            transform = src.transform
-            crs = src.crs
-
-            # ----------------------------------------------------------
-            # Build nodata/invalid mask  (True = invalid pixel)
-            # ----------------------------------------------------------
+            # --- Invalid pixel mask (nodata, NaN, Inf) ---
             invalid_mask = np.zeros(green.shape, dtype=bool)
-
             if nodata is not None:
                 invalid_mask |= (green == nodata)
                 invalid_mask |= (nir   == nodata)
-
-            # Pixels with NaN or Inf
             invalid_mask |= ~np.isfinite(green)
             invalid_mask |= ~np.isfinite(nir)
 
-            # ----------------------------------------------------------
-            # NDWI = (Green - NIR) / (Green + NIR)
-            # Safe division: avoid zero denominator
-            # ----------------------------------------------------------
-            denominator = green + nir
-            safe_denom  = np.where(
-                np.abs(denominator) < 1e-6,
-                np.nan,
-                denominator,
-            )
+            # --- NDWI = (Green - NIR) / (Green + NIR) ---
+            ndwi = compute_ndwi(green, nir, invalid_mask)
 
-            ndwi = np.where(
-                invalid_mask,
-                np.nan,
-                (green - nir) / safe_denom,
-            )
+            # --- NDWI statistics ---
+            ndwi_stats = compute_ndwi_stats(ndwi, invalid_mask)
 
-            logger.info(
-                "NDWI range: min=%.4f, max=%.4f (ignoring NaN)",
-                float(np.nanmin(ndwi)),
-                float(np.nanmax(ndwi)),
-            )
+            # --- Threshold selection ---
+            threshold_info = {
+                "selected_threshold": threshold,
+                "threshold_method":   "manual",
+                "otsu_threshold":     None,
+                "fallback_reason":    None,
+                "review_required":    False,
+            }
 
-            # ----------------------------------------------------------
-            # Water mask: NDWI >= threshold  AND  valid pixel
-            # ----------------------------------------------------------
-            water_mask = (
-                np.isfinite(ndwi)
-                & ~invalid_mask
-                & (ndwi >= threshold)
-            ).astype(np.uint8)
-
-            water_pixels_raw = int(water_mask.sum())
-            logger.info("Water pixels before cleaning: %d", water_pixels_raw)
-
-            if water_pixels_raw == 0:
-                return {
-                    "success":          True,
-                    "detection_method": "NDWI",
-                    "ndwi_threshold":   threshold,
-                    "statistics": {
-                        "water_body_count":       0,
-                        "total_water_area_km2":   0.0,
-                        "largest_water_body_km2": 0.0,
-                        "average_water_body_km2": 0.0,
-                    },
-                    "geojson": {
-                        "type":     "FeatureCollection",
-                        "features": [],
-                    },
-                }
-
-            # ----------------------------------------------------------
-            # Noise cleaning — morphological opening (3×3 kernel)
-            # Removes isolated specks while preserving real water bodies
-            # ----------------------------------------------------------
-            cleaned_mask = binary_opening(
-                water_mask.astype(bool),
-                structure=np.ones((3, 3)),
-            ).astype(np.uint8)
-
-            # ----------------------------------------------------------
-            # Connected-component labelling — remove tiny regions
-            # ----------------------------------------------------------
-            labelled, num_features = label(cleaned_mask)
-            logger.info("Connected components before size filter: %d", num_features)
-
-            # Count pixels per label and build a keep-mask
-            component_sizes = np.bincount(labelled.ravel())
-            # component_sizes[0] = background (skip)
-            keep_labels = set(
-                idx for idx, count in enumerate(component_sizes)
-                if idx > 0 and count >= min_pixels
-            )
-
-            final_mask = np.isin(labelled, list(keep_labels)).astype(np.uint8)
-
-            water_pixels_final = int(final_mask.sum())
-            logger.info(
-                "Water pixels after cleaning: %d (components kept: %d)",
-                water_pixels_final, len(keep_labels),
-            )
-
-            if water_pixels_final == 0:
-                return {
-                    "success":          True,
-                    "detection_method": "NDWI",
-                    "ndwi_threshold":   threshold,
-                    "statistics": {
-                        "water_body_count":       0,
-                        "total_water_area_km2":   0.0,
-                        "largest_water_body_km2": 0.0,
-                        "average_water_body_km2": 0.0,
-                    },
-                    "geojson": {
-                        "type":     "FeatureCollection",
-                        "features": [],
-                    },
-                }
-
-            # ----------------------------------------------------------
-            # Pixel area in m² (from transform)
-            # ----------------------------------------------------------
-            pixel_width_m  = abs(transform.a)
-            pixel_height_m = abs(transform.e)
-            pixel_area_m2  = pixel_width_m * pixel_height_m
-
-            # ----------------------------------------------------------
-            # Polygonize with rasterio.features.shapes
-            # ----------------------------------------------------------
-            features = []
-            areas_m2 = []
-
-            for geom_dict, value in shapes(
-                final_mask,
-                mask=final_mask,
-                transform=transform,
-            ):
-                if value == 0:
-                    continue
-
-                geom = shape(geom_dict)
-
-                # Make geometry valid (handles self-intersections)
-                geom = make_valid(geom)
-
-                if geom.is_empty:
-                    continue
-
-                # Simplify for browser performance
-                geom_simplified = geom.simplify(
-                    SIMPLIFY_TOLERANCE,
-                    preserve_topology=True,
+            if threshold_mode == "adaptive":
+                threshold_info = compute_otsu_threshold(
+                    ndwi, invalid_mask, fallback_threshold=threshold,
                 )
 
-                if geom_simplified.is_empty:
-                    geom_simplified = geom
+            effective_threshold = threshold_info["selected_threshold"]
 
-                # Area in m²
-                area_m2 = geom.area  # shapely area in CRS units
+            # --- Raw water mask ---
+            raw_mask = create_raw_water_mask(ndwi, invalid_mask, effective_threshold)
+            raw_water_pixels = int(raw_mask.sum())
+            total_valid = ndwi_stats["valid_pixels"]
+            raw_water_pct = round((raw_water_pixels / total_valid) * 100.0, 2) if total_valid > 0 else 0.0
 
-                # If CRS is geographic (degrees), compute approximate area
-                if crs and crs.is_geographic:
-                    # Approximate: use centroid latitude for correction
-                    centroid = geom.centroid
-                    lat_rad  = math.radians(centroid.y)
-                    # 1 degree lat ≈ 111320 m; 1 degree lon ≈ 111320 * cos(lat) m
-                    m_per_deg_lat = 111320.0
-                    m_per_deg_lon = 111320.0 * math.cos(lat_rad)
-                    area_m2 = geom.area * m_per_deg_lat * m_per_deg_lon
-                else:
-                    # CRS is projected — shapely area is in CRS units (m²)
-                    area_m2 = geom.area
+            # Early exit — no water found
+            if raw_water_pixels == 0:
+                plausibility = check_extent_plausibility(0.0, threshold_info["threshold_method"], threshold_info.get("fallback_reason"))
+                return _build_response(
+                    threshold_info, ndwi_stats, 0.0, 0,
+                    plausibility, crs, 0, 0,
+                    {"type": "FeatureCollection", "features": []},
+                    debug_info={"raw_water_pixels": 0, "cleaned_water_pixels": 0} if debug else None,
+                )
 
-                area_km2 = area_m2 / 1_000_000
+            # --- Morphological cleanup ---
+            cleaned_mask, morph_info = clean_water_mask(raw_mask, min_pixels=min_pixels)
+            cleaned_water_pixels = int(cleaned_mask.sum())
+            cleaned_water_pct = round((cleaned_water_pixels / total_valid) * 100.0, 2) if total_valid > 0 else 0.0
 
-                # Centroid for hover/click
-                centroid = geom.centroid
+            if cleaned_water_pixels == 0:
+                plausibility = check_extent_plausibility(0.0, threshold_info["threshold_method"], threshold_info.get("fallback_reason"))
+                return _build_response(
+                    threshold_info, ndwi_stats, 0.0, 0,
+                    plausibility, crs, 0, raw_water_pixels,
+                    {"type": "FeatureCollection", "features": []},
+                    debug_info=morph_info if debug else None,
+                )
 
-                # Average NDWI over the polygon's pixels
-                # (use the label-mask for cheap extraction)
-                # We use a bounding-box slice for speed
-                bounds    = geom.bounds  # (minx, miny, maxx, maxy)
-                # Convert bounds to pixel row/col
-                col_min, row_min = ~transform * (bounds[0], bounds[3])
-                col_max, row_max = ~transform * (bounds[2], bounds[1])
-                row_min, row_max = int(max(0, min(row_min, row_max))), int(min(ndwi.shape[0] - 1, max(row_min, row_max)))
-                col_min, col_max = int(max(0, min(col_min, col_max))), int(min(ndwi.shape[1] - 1, max(col_min, col_max)))
+            # --- Polygonization ---
+            features = polygonize_water_mask(cleaned_mask, transform, crs, ndwi, effective_threshold)
 
-                ndwi_slice  = ndwi[row_min:row_max + 1, col_min:col_max + 1]
-                mask_slice  = final_mask[row_min:row_max + 1, col_min:col_max + 1]
-                ndwi_water  = ndwi_slice[mask_slice == 1]
-                avg_ndwi    = float(np.nanmean(ndwi_water)) if ndwi_water.size > 0 else float(threshold)
-
-                feature = {
-                    "type": "Feature",
-                    "properties": {
-                        "source":         "NDWI",
-                        "ndwi_threshold": round(threshold, 4),
-                        "ndwi_mean":      round(avg_ndwi, 4),
-                        "area_m2":        round(area_m2, 2),
-                        "area_km2":       round(area_km2, 6),
-                        "centroid_lat":   round(centroid.y, 6),
-                        "centroid_lon":   round(centroid.x, 6),
-                    },
-                    "geometry": mapping(geom_simplified),
-                }
-
-                features.append(feature)
-                areas_m2.append(area_m2)
-
-            # ----------------------------------------------------------
-            # Statistics
-            # ----------------------------------------------------------
+            areas_km2 = [f["properties"]["area_km2"] for f in features]
+            total_area_km2   = round(sum(areas_km2), 4)
+            largest_km2      = round(max(areas_km2), 4)   if areas_km2 else 0.0
+            average_km2      = round(sum(areas_km2) / len(areas_km2), 4) if areas_km2 else 0.0
             water_body_count = len(features)
 
-            if areas_m2:
-                total_area_km2   = sum(areas_m2) / 1_000_000
-                largest_km2      = max(areas_m2)  / 1_000_000
-                average_km2      = (sum(areas_m2) / len(areas_m2)) / 1_000_000
-            else:
-                total_area_km2 = largest_km2 = average_km2 = 0.0
-
-            logger.info(
-                "NDWI done — bodies=%d, total=%.4f km²",
-                water_body_count, total_area_km2,
+            # --- Plausibility & quality ---
+            plausibility = check_extent_plausibility(
+                cleaned_water_pct,
+                threshold_info["threshold_method"],
+                threshold_info.get("fallback_reason"),
+            )
+            detection_quality = compute_detection_quality(
+                ndwi_stats["valid_pixel_percentage"],
+                cleaned_water_pct,
+                plausibility["review_required"],
             )
 
-            return {
-                "success":          True,
-                "detection_method": "NDWI",
-                "ndwi_threshold":   threshold,
-                "statistics": {
-                    "water_body_count":       water_body_count,
-                    "total_water_area_km2":   round(total_area_km2, 4),
-                    "largest_water_body_km2": round(largest_km2, 4),
-                    "average_water_body_km2": round(average_km2, 4),
+            statistics = {
+                # Water bodies
+                "water_body_count":       water_body_count,
+                "total_water_area_km2":   total_area_km2,
+                "largest_water_body_km2": largest_km2,
+                "average_water_body_km2": average_km2,
+                # NDWI distribution
+                "ndwi_min":    ndwi_stats["ndwi_min"],
+                "ndwi_max":    ndwi_stats["ndwi_max"],
+                "ndwi_mean":   ndwi_stats["ndwi_mean"],
+                "ndwi_median": ndwi_stats["ndwi_median"],
+                "ndwi_std":    ndwi_stats["ndwi_std"],
+                # Pixel coverage
+                "valid_pixels":             total_valid,
+                "valid_pixel_percentage":   ndwi_stats["valid_pixel_percentage"],
+                "cloud_shadow_percentage":  ndwi_stats["invalid_pixel_percentage"],
+                "water_pixels":             cleaned_water_pixels,
+                "water_pixel_percentage":   cleaned_water_pct,
+                # Quality
+                "detection_quality": detection_quality,
+            }
+
+            result = {
+                "success":              True,
+                "satellite_source":     "Sentinel-2 Surface Reflectance Harmonized",
+                "spatial_resolution_m": S2_SPATIAL_RESOLUTION_M,
+                "detection_method":     "NDWI (Green=B3, NIR=B8)",
+                "selected_threshold":   effective_threshold,
+                "threshold_method":     threshold_info["threshold_method"],
+                "threshold_info":       threshold_info,
+                "ndwi_threshold":       effective_threshold,  # backwards-compatible alias
+                "statistics":           statistics,
+                "validation_flags":     {
+                    **plausibility,
+                    "disclaimer": (
+                        "This result represents Sentinel-2 derived surface-water extent. "
+                        "It is NOT ground truth. Spatial resolution: 10 m. "
+                        "Results may vary with cloud cover, seasonal conditions, "
+                        "and NDWI threshold selection."
+                    ),
                 },
                 "geojson": {
                     "type":     "FeatureCollection",
@@ -437,11 +275,76 @@ def process_ndwi_image(
                 },
             }
 
+            if debug:
+                result["debug_info"] = {
+                    **morph_info,
+                    "raw_water_pct":     raw_water_pct,
+                    "cleaned_water_pct": cleaned_water_pct,
+                    "otsu_threshold":    threshold_info.get("otsu_threshold"),
+                }
+
+            return result
+
     except ValueError:
         raise
-
     except Exception as err:
         logger.exception("NDWI processing error: %s", err)
-        raise RuntimeError(
-            "Water detection failed. Please check the uploaded image and try again."
-        )
+        raise RuntimeError("Water detection failed. Please check the uploaded image and try again.")
+
+
+# =========================================================
+# RESPONSE BUILDER (EMPTY RESULT)
+# =========================================================
+
+def _build_response(
+    threshold_info, ndwi_stats,
+    water_pct, water_body_count,
+    plausibility, crs,
+    cleaned_pixels, raw_pixels,
+    geojson,
+    debug_info=None,
+) -> dict:
+    effective_threshold = threshold_info["selected_threshold"]
+    detection_quality = compute_detection_quality(
+        ndwi_stats["valid_pixel_percentage"],
+        water_pct,
+        plausibility["review_required"],
+    )
+    res = {
+        "success":              True,
+        "satellite_source":     "Sentinel-2 Surface Reflectance Harmonized",
+        "spatial_resolution_m": S2_SPATIAL_RESOLUTION_M,
+        "detection_method":     "NDWI (Green=B3, NIR=B8)",
+        "selected_threshold":   effective_threshold,
+        "threshold_method":     threshold_info["threshold_method"],
+        "threshold_info":       threshold_info,
+        "ndwi_threshold":       effective_threshold,
+        "statistics": {
+            "water_body_count":       water_body_count,
+            "total_water_area_km2":   0.0,
+            "largest_water_body_km2": 0.0,
+            "average_water_body_km2": 0.0,
+            "ndwi_min":    ndwi_stats.get("ndwi_min"),
+            "ndwi_max":    ndwi_stats.get("ndwi_max"),
+            "ndwi_mean":   ndwi_stats.get("ndwi_mean"),
+            "ndwi_median": ndwi_stats.get("ndwi_median"),
+            "ndwi_std":    ndwi_stats.get("ndwi_std"),
+            "valid_pixels":             ndwi_stats.get("valid_pixels", 0),
+            "valid_pixel_percentage":   ndwi_stats.get("valid_pixel_percentage", 0.0),
+            "cloud_shadow_percentage":  ndwi_stats.get("invalid_pixel_percentage", 0.0),
+            "water_pixels":             cleaned_pixels,
+            "water_pixel_percentage":   water_pct,
+            "detection_quality":        detection_quality,
+        },
+        "validation_flags": {
+            **plausibility,
+            "disclaimer": (
+                "This result represents Sentinel-2 derived surface-water extent. "
+                "It is NOT ground truth. Spatial resolution: 10 m."
+            ),
+        },
+        "geojson": geojson,
+    }
+    if debug_info is not None:
+        res["debug_info"] = debug_info
+    return res
