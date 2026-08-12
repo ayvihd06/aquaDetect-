@@ -18,7 +18,7 @@ const API_BASE = "http://127.0.0.1:8000";
 
 const ANALYSIS_OPTIONS = [
   { id: "district",     label: "District Water Bodies", icon: "🗺" },
-  { id: "ndwi",         label: "NDWI Analysis",         icon: "🛰" },
+  { id: "ndwi",         label: "Dynamic Image Analysis", icon: "🛰" },
   { id: "water-change", label: "Water Change Analysis", icon: "💧" },
   { id: "flood",        label: "Flood Risk Analysis",   icon: "🌊" },
   { id: "drought",      label: "Drought Risk Analysis", icon: "☀" },

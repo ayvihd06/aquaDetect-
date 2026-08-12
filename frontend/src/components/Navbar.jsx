@@ -10,8 +10,8 @@
 import { useState } from "react";
 
 const MODES = [
-  { id: "district",     label: "District",      icon: "🗺" },
-  { id: "ndwi",         label: "NDWI",          icon: "🛰" },
+  { id: "district",     label: "District",               icon: "🗺" },
+  { id: "ndwi",         label: "Dynamic Image Analysis", icon: "🛰" },
   { id: "water-change", label: "Water Change",  icon: "💧" },
   { id: "flood",        label: "Flood",         icon: "🌊" },
   { id: "drought",      label: "Drought",       icon: "☀" },
