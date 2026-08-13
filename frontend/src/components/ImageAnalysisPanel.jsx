@@ -14,7 +14,7 @@ import { useState, useRef, useCallback } from "react";
 //   7. Calls onNdwiResult(geojson, stats) on success
 // =========================================================
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
 // Shared compact text styles (matching MapView panel)
 const labelStyle = {

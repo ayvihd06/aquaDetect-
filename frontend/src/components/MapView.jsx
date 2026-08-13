@@ -705,7 +705,7 @@ function MapView({
 
           const response =
             await fetch(
-              "http://127.0.0.1:8000/osm/water-name",
+              `${import.meta.env.VITE_API_BASE_URL}/osm/water-name`,
               {
                 method: "POST",
 
@@ -1028,7 +1028,7 @@ function MapView({
 
 
           const response = await fetch(
-            "http://127.0.0.1:8000/osm/water-name",
+            `${import.meta.env.VITE_API_BASE_URL}/osm/water-name`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
