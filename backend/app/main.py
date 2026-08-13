@@ -79,15 +79,20 @@ app.include_router(gis_export_router)
 # CORS — Allow React frontend to call the backend
 # =========================================================
 
-# Allows both the primary Vite dev port (5173) and alternate port (5174)
+# Allows localhost dev ports AND all Vercel deployment URLs (including previews)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        # Local development
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+        # Vercel production & preview deployments
+        "https://aqua-detect-46m5m4fox-ayvihd06s-projects.vercel.app",
+        "https://aquadetect.vercel.app",
     ],
+    allow_origin_regex=r"https://aqua-detect.*\.vercel\.app",  # Covers all Vercel preview URLs
     allow_credentials=True,
     allow_methods=["*"],   # Allow all HTTP verbs (GET, POST, OPTIONS, etc.)
     allow_headers=["*"],   # Allow all request headers
